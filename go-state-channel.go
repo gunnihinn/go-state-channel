@@ -15,32 +15,58 @@ type State struct {
 	frobinate bool
 }
 
-var state State
+// Copy may be arbitrarily complicated if State contains slices, maps,
+// pointers, or other structs.
+func (s State) Copy() State {
+	return s
+}
 
-func handler(w http.ResponseWriter, r *http.Request) {
-	start := state.frobinate
+func stateManager(stateCh chan State, toggle chan os.Signal) {
+	state := State{}
 
-	time.Sleep(100 * time.Millisecond)
+	for {
+		select {
+		case stateCh <- state.Copy():
 
-	if start != state.frobinate {
-		http.Error(w, "Great non-success", http.StatusInternalServerError)
-	} else {
-		fmt.Fprintln(w, "Great success")
+		case <-toggle:
+			state.frobinate = !state.frobinate
+		}
 	}
 }
 
+func handler(stateCh chan State) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s := <-stateCh
+
+		start := s.frobinate
+
+		time.Sleep(100 * time.Millisecond)
+
+		if start != s.frobinate {
+			http.Error(w, "Great non-success", http.StatusInternalServerError)
+		} else {
+			fmt.Fprintln(w, "Great success")
+		}
+	}
+}
+
+func help() string {
+	return fmt.Sprintf(`Try me out by running:
+
+$ curl localhost:8080
+$ kill -s HUP %d
+$ curl localhost:8080`, syscall.Getpid())
+}
+
 func main() {
+	stateCh := make(chan State)
+
 	toggle := make(chan os.Signal, 1)
 	signal.Notify(toggle, syscall.SIGHUP)
 
-	go func() {
-		for {
-			<-toggle
-			state.frobinate = !state.frobinate
-		}
-	}()
+	go stateManager(stateCh, toggle)
 
-	http.HandleFunc("/", handler)
+	http.HandleFunc("/", handler(stateCh))
 
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatal(err)
